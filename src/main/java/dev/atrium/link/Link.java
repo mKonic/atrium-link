@@ -25,9 +25,11 @@ public final class Link {
     public static final int HELLO = 1, PAIR_COMMIT = 2, PAIR_KEY = 3, PAIR_REVEAL = 4, PAIR_ACCEPT = 5,
             PAIR_REJECT = 6, AUTH = 7, PROOF = 8, UNKNOWN = 9, REFUSED = 10,
             AUDIO_START = 16, AUDIO_STOP = 17, AUDIO_STATE = 18, MEDIA = 19, MEDIA_COMMAND = 20,
-            DISCONNECT = 21, WANT = 22;
+            DISCONNECT = 21, WANT = 22, MIC_STATE = 23, MIC_START = 24, MIC_STOP = 25;
 
     public static final int AUDIO_STOPPED = 0, AUDIO_STREAMING = 1, AUDIO_FAILED = 2;
+    // MIC_STATE: not shared; shared and closed; recording; shared, but it can't record.
+    public static final int MIC_OFF = 0, MIC_READY = 1, MIC_LIVE = 2, MIC_FAILED = 3;
 
     public static final int MEDIA_NONE = 0, MEDIA_PLAYING = 1, MEDIA_PAUSED = 2, MEDIA_STOPPED = 3;
     public static final int CAN_PLAY = 1, CAN_PAUSE = 2, CAN_NEXT = 4, CAN_PREVIOUS = 8, CAN_SEEK = 16;
@@ -457,39 +459,68 @@ public final class Link {
     public static final int AUDIO_HEADER = 12;
     public static final int DISCONTINUITY = 1;
 
+    // One stream's datagrams: the phone's sound, or its microphone (mono).
+    public static final class Datagrams {
+        public final int audioMagic, nackMagic, audioLabel, nackLabel, frameBytes;
+
+        Datagrams(int audioMagic, int nackMagic, int audioLabel, int nackLabel, int frameBytes) {
+            this.audioMagic = audioMagic;
+            this.nackMagic = nackMagic;
+            this.audioLabel = audioLabel;
+            this.nackLabel = nackLabel;
+            this.frameBytes = frameBytes;
+        }
+    }
+
+    public static final Datagrams SOUND = new Datagrams(AUDIO_MAGIC, NACK_MAGIC, AUDIO_LABEL, NACK_LABEL, FRAME_BYTES);
+    public static final Datagrams MIC = new Datagrams(0xA9, 0xAA, 5, 6, 2);
+
     // `pcm` from `off`, `frames` frames.
     public static byte[] packAudio(Cipher c, byte[] key, int flags, int seq, int timestamp, byte[] pcm, int off, int frames) {
+        return packAudio(SOUND, c, key, flags, seq, timestamp, pcm, off, frames);
+    }
+
+    public static byte[] packAudio(Datagrams kind, Cipher c, byte[] key, int flags, int seq, int timestamp, byte[] pcm,
+            int off, int frames) {
         byte[] hdr = new byte[AUDIO_HEADER];
-        hdr[0] = (byte) AUDIO_MAGIC;
+        hdr[0] = (byte) kind.audioMagic;
         hdr[1] = (byte) flags;
         hdr[2] = (byte) (frames >> 8);
         hdr[3] = (byte) frames;
         put32(hdr, 4, seq & 0xffffffffL);
         put32(hdr, 8, timestamp & 0xffffffffL);
-        return Crypto.cat(hdr, Crypto.seal(c, key, Crypto.nonce(AUDIO_LABEL, seq & 0xffffffffL), hdr, pcm, off,
-                frames * FRAME_BYTES));
+        return Crypto.cat(hdr, Crypto.seal(c, key, Crypto.nonce(kind.audioLabel, seq & 0xffffffffL), hdr, pcm, off,
+                frames * kind.frameBytes));
     }
 
     public static byte[] packNack(Cipher c, byte[] key, int counter, int[] seqs) {
+        return packNack(SOUND, c, key, counter, seqs);
+    }
+
+    public static byte[] packNack(Datagrams kind, Cipher c, byte[] key, int counter, int[] seqs) {
         byte[] hdr = new byte[8], body = new byte[seqs.length * 4];
-        hdr[0] = (byte) NACK_MAGIC;
+        hdr[0] = (byte) kind.nackMagic;
         hdr[2] = (byte) (seqs.length >> 8);
         hdr[3] = (byte) seqs.length;
         put32(hdr, 4, counter & 0xffffffffL);
         for (int i = 0; i < seqs.length; i++)
             put32(body, i * 4, seqs[i] & 0xffffffffL);
-        return Crypto.cat(hdr, Crypto.seal(c, key, Crypto.nonce(NACK_LABEL, counter & 0xffffffffL), hdr, body, 0, body.length));
+        return Crypto.cat(hdr, Crypto.seal(c, key, Crypto.nonce(kind.nackLabel, counter & 0xffffffffL), hdr, body, 0, body.length));
     }
 
     // The asked-for seqs, or null; out[0] gets the counter.
     public static int[] unpackNack(Cipher c, byte[] key, byte[] d, int len, long[] counter) {
-        if (len < 8 + Crypto.TAG || (d[0] & 0xff) != NACK_MAGIC)
+        return unpackNack(SOUND, c, key, d, len, counter);
+    }
+
+    public static int[] unpackNack(Datagrams kind, Cipher c, byte[] key, byte[] d, int len, long[] counter) {
+        if (len < 8 + Crypto.TAG || (d[0] & 0xff) != kind.nackMagic)
             return null;
         int count = (int) get(d, 2, 2);
         long ctr = get(d, 4, 4);
         if (len != 8 + count * 4 + Crypto.TAG)
             return null;
-        byte[] body = Crypto.open(c, key, Crypto.nonce(NACK_LABEL, ctr), Arrays.copyOfRange(d, 0, 8), d, 8, len - 8);
+        byte[] body = Crypto.open(c, key, Crypto.nonce(kind.nackLabel, ctr), Arrays.copyOfRange(d, 0, 8), d, 8, len - 8);
         if (body == null)
             return null;
         int[] seqs = new int[count];

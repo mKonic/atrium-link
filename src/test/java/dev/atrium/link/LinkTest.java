@@ -279,6 +279,13 @@ public final class LinkTest {
         check(Arrays.equals(Link.unpackNack(c, key, wide, wide.length, null), new int[] {-1}), "seq 0xffffffff");
         nack[1] = 1;
         check(Link.unpackNack(c, key, nack, nack.length, null) == null, "nack header authenticated");
+        eq(hex(Link.packAudio(Link.MIC, c, key, 0, 1, 2, ascii("abcd"), 0, 2)),
+                "a900000200000001000000024b8c8aef3e11a4fb30b95f6fc68241c69937959d", "golden microphone");
+        byte[] micNack = Link.packNack(Link.MIC, c, key, 9, new int[] {1, 5});
+        eq(hex(micNack), "aa000002000000095509529152c1d64c4b82dc2d8de8ad5d0476ea78ae9d63a2", "golden microphone nack");
+        check(Link.unpackNack(c, key, micNack, micNack.length, null) == null, "a microphone nack is no sound nack");
+        check(Arrays.equals(Link.unpackNack(Link.MIC, c, key, micNack, micNack.length, null), new int[] {1, 5}),
+                "microphone nack round trip");
         byte[] audio = Link.packAudio(c, key, 0, 1, 2, ascii("abcd"), 0, 1);
         check(Link.unpackNack(c, key, audio, audio.length, null) == null, "audio is no nack");
         byte[] full = Link.packAudio(c, key, Link.DISCONTINUITY, -2, 123456, new byte[960], 0, Link.PACKET_FRAMES);

@@ -28,10 +28,14 @@ import java.util.concurrent.LinkedBlockingQueue;
 //
 // The Atrium Link app talks to it over Control: it sends commands ("pair",
 // "cancel", "accept", "reject", "connect <id>", "disconnect <id>",
-// "auto <id> on|off", "forget <id>") and gets the status, sent again on
-// every change. Pairing is open for
+// "auto <id> on|off", "mic <id> on|off", "forget <id>") and gets the status,
+// sent again on every change. Pairing is open for
 // PAIR_WINDOW_MS after "pair". The paired PCs are in `paired`, one per line:
 // hex id, hex key, name.
+//
+// A PC the user shares the microphone with (`mic`, one id a line; none
+// until asked) sees it as a microphone of its own, and the phone records
+// only while something there records from it (MIC_START to MIC_STOP).
 final class LanLink {
     private static final long PAIR_WINDOW_MS = 120_000;
     // How long "connect" asks the PC (over mDNS: the PC connects, not us).
@@ -47,6 +51,8 @@ final class LanLink {
     // themselves: in `manual`, one id a line.
     private final java.util.Set<String> manual = new java.util.HashSet<>();
     private final File manualFile;
+    private final java.util.Set<String> micShared = new java.util.HashSet<>();
+    private final File micFile;
     private final List<Conn> conns = new ArrayList<>();
     private final MediaBridge media;
     private int port;
@@ -66,6 +72,7 @@ final class LanLink {
         this.name = name;
         this.pairedFile = new File(dir, "paired");
         this.manualFile = new File(dir, "manual");
+        this.micFile = new File(dir, "mic");
         this.id = loadId(new File(dir, "id"));
         this.media = new MediaBridge(ctx, main, body -> {
             for (Conn k : new ArrayList<>(conns))
@@ -106,6 +113,19 @@ final class LanLink {
                     manual.add(line.trim());
         } catch (IOException ignored) {
         }
+        try {
+            for (String line : Files.readAllLines(micFile.toPath(), StandardCharsets.UTF_8))
+                if (paired.containsKey(line.trim()))
+                    micShared.add(line.trim());
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void saveMic() {
+        StringBuilder sb = new StringBuilder();
+        for (String pc : micShared)
+            sb.append(pc).append('\n');
+        writeAtomically(micFile, sb.toString());
     }
 
     private void saveManual() {
@@ -180,6 +200,20 @@ final class LanLink {
                 }
                 saveManual();
             }
+        } else if (c.startsWith("mic ")) {
+            String[] a = c.split(" ");
+            if (a.length == 3 && paired.containsKey(a[1])) {
+                boolean on = a[2].equals("on");
+                if (on ? micShared.add(a[1]) : micShared.remove(a[1])) {
+                    saveMic();
+                    for (Conn k : new ArrayList<>(conns))
+                        if (k.link.ready() && Crypto.hex(k.link.peerId()).equals(a[1])) {
+                            if (!on)
+                                k.stopMic();
+                            k.micState(on ? Link.MIC_READY : Link.MIC_OFF, "");
+                        }
+                }
+            }
         } else if (c.equals("cancel")) {
             pairUntil = 0;
             if (confirming != null)
@@ -194,6 +228,8 @@ final class LanLink {
                 savePaired();
                 if (manual.remove(pc))
                     saveManual();
+                if (micShared.remove(pc))
+                    saveMic();
                 for (Conn k : new ArrayList<>(conns))
                     if (Crypto.hex(k.link.peerId()).equals(pc))
                         k.close();
@@ -253,13 +289,16 @@ final class LanLink {
                 JSONObject p = new JSONObject();
                 p.put("id", e.getKey());
                 p.put("name", e.getValue()[1]);
-                boolean connected = false, streaming = false;
+                boolean connected = false, streaming = false, micLive = false;
                 for (Conn k : conns) {
                     if (k.link.ready() && Crypto.hex(k.link.peerId()).equals(e.getKey())) {
                         connected = true;
                         streaming |= k.audio != null;
+                        micLive |= k.mic != null;
                     }
                 }
+                p.put("mic", micShared.contains(e.getKey()));
+                p.put("micLive", micLive);
                 p.put("connected", connected);
                 p.put("streaming", streaming);
                 p.put("calling", !connected && calling(e.getKey()));
@@ -343,8 +382,8 @@ final class LanLink {
         final Socket socket;
         final Link link;
         final LinkedBlockingQueue<byte[]> out = new LinkedBlockingQueue<>();
-        AudioSender audio;
-        int nextSeq;
+        AudioSender audio, mic;
+        int nextSeq, nextMicSeq;
         boolean closed;
 
         Conn(Socket socket) {
@@ -435,6 +474,7 @@ final class LanLink {
                             savePaired();
                         }
                         apply(link.message(Link.MEDIA, media.current()));
+                        micState(micShared.contains(Crypto.hex(link.peerId())) ? Link.MIC_READY : Link.MIC_OFF, "");
                         writeStatus();
                         break;
                     case Link.Event.MESSAGE:
@@ -464,6 +504,16 @@ final class LanLink {
                     Log.i("lan: " + link.peerName() + " came by itself; it connects only when asked");
                     disconnect();
                 }
+            } else if (type == Link.MIC_START && body.length >= 4) {
+                if (!micShared.contains(Crypto.hex(link.peerId()))) {
+                    micState(Link.MIC_OFF, "");
+                    return;
+                }
+                startMic(socket.getInetAddress(), (int) Link.get(body, 0, 2), (int) Link.get(body, 2, 2));
+            } else if (type == Link.MIC_STOP) {
+                stopMic();
+                if (micShared.contains(Crypto.hex(link.peerId())))
+                    micState(Link.MIC_READY, "");
             } else if (type == Link.MEDIA_COMMAND) {
                 long[] c = Link.unpackMediaCommand(body);
                 if (c != null)
@@ -479,7 +529,7 @@ final class LanLink {
                     k.state(Link.AUDIO_STOPPED, "another PC took the audio");
                 }
             stopAudio();
-            AudioSender a = new AudioSender(ctx, link.datagramKey(), nextSeq, pc, udpPort, frames, port, why -> main.post(() -> {
+            AudioSender a = new AudioSender(ctx, Link.SOUND, link.datagramKey(), nextSeq, pc, udpPort, frames, port, why -> main.post(() -> {
                 if (audio == null || why == null)
                     return;
                 nextSeq = audio.nextSeq();
@@ -508,6 +558,52 @@ final class LanLink {
             writeStatus();
         }
 
+        void startMic(InetAddress pc, int udpPort, int frames) {
+            // One PC at a time records.
+            for (Conn k : conns)
+                if (k != this && k.mic != null) {
+                    k.stopMic();
+                    k.micState(Link.MIC_FAILED, "another PC is using the microphone");
+                }
+            stopMic();
+            AudioSender a = new AudioSender(ctx, Link.MIC, link.datagramKey(), nextMicSeq, pc, udpPort, frames, port,
+                    why -> main.post(() -> {
+                        if (mic == null || why == null)
+                            return;
+                        nextMicSeq = mic.nextSeq();
+                        mic = null;
+                        micState(Link.MIC_FAILED, why);
+                        writeStatus();
+                    }));
+            try {
+                a.start();
+                mic = a;
+                micState(Link.MIC_LIVE, "");
+            } catch (IOException e) {
+                Log.i("mic: can't record: " + e.getMessage());
+                micState(Link.MIC_FAILED, String.valueOf(e.getMessage()));
+            }
+            writeStatus();
+        }
+
+        void stopMic() {
+            if (mic == null)
+                return;
+            AudioSender a = mic;
+            mic = null;
+            a.stop();
+            nextMicSeq = a.nextSeq();
+            writeStatus();
+        }
+
+        void micState(int state, String why) {
+            byte[] w = why.getBytes(StandardCharsets.UTF_8);
+            byte[] body = new byte[1 + w.length];
+            body[0] = (byte) state;
+            System.arraycopy(w, 0, body, 1, w.length);
+            apply(link.message(Link.MIC_STATE, body));
+        }
+
         void state(int state, String why) {
             byte[] w = why.getBytes(StandardCharsets.UTF_8);
             byte[] body = new byte[1 + w.length];
@@ -519,6 +615,7 @@ final class LanLink {
         // The user's: the PC stays away until asked back.
         void disconnect() {
             stopAudio();
+            stopMic();
             apply(link.message(Link.DISCONNECT, new byte[0]));
             finish();
         }
@@ -527,6 +624,7 @@ final class LanLink {
         // PC why), or after a while if the PC isn't taking it.
         void finish() {
             stopAudio();
+            stopMic();
             out.add(new byte[0]);  // the writer closes when it gets here
             main.postDelayed(this::close, 2000);
         }
@@ -536,6 +634,7 @@ final class LanLink {
                 return;
             closed = true;
             stopAudio();
+            stopMic();
             conns.remove(this);
             if (confirming == this) {
                 // A code that was shown and didn't pair (rejected on either

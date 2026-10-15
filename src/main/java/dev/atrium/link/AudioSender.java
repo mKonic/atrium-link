@@ -24,6 +24,10 @@ import javax.crypto.Cipher;
 // app is in a call's mode). Shell holds the permissions for both, and
 // neither takes notice of apps opting out of playback capture.
 //
+// With Link.MIC it sends the microphone instead, mono, recorded as speech
+// recognisers want it (VOICE_RECOGNITION: no echo cancelling or gain
+// control). The privacy indicator shows while it records.
+//
 // Every 5 ms of audio is a datagram (see Link's datagrams). Digital silence
 // longer than SILENT_AFTER isn't sent; the next sound goes out flagged
 // DISCONTINUITY. The last HISTORY datagrams are kept to resend when the PC
@@ -38,6 +42,8 @@ final class AudioSender {
     private static final int HISTORY = 1024;               // ~5 s
 
     private final Context ctx;
+    private final Link.Datagrams kind;
+    private final String tag;
     private final byte[] key;
     private final InetSocketAddress to;
     private final int frames, localPort;
@@ -57,7 +63,10 @@ final class AudioSender {
 
     // `localPort`: sent from, the same number as the link's TCP port, so
     // the PC knows where to send first (see Link's datagrams).
-    AudioSender(Context ctx, byte[] key, int firstSeq, InetAddress pc, int port, int frames, int localPort, Listener listener) {
+    AudioSender(Context ctx, Link.Datagrams kind, byte[] key, int firstSeq, InetAddress pc, int port, int frames,
+            int localPort, Listener listener) {
+        this.kind = kind;
+        this.tag = kind == Link.MIC ? "mic: " : "audio: ";
         this.localPort = localPort;
         this.ctx = ctx;
         this.seq = firstSeq;
@@ -76,13 +85,27 @@ final class AudioSender {
                 .build();
         int min = AudioRecord.getMinBufferSize(Link.RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT);
         try {
-            try {
-                loopback = Loopback.open(ctx, Link.RATE);
-                record = loopback.record;
-                Log.i("audio: capturing through an audio policy");
-            } catch (Exception e) {
-                Throwable t = e instanceof java.lang.reflect.InvocationTargetException ? e.getCause() : e;
-                Log.i("audio: no audio policy (" + t + "), recording the default output");
+            if (kind == Link.MIC) {
+                int minMono = AudioRecord.getMinBufferSize(Link.RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                record = new AudioRecord.Builder()
+                    .setContext(ctx)
+                    .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setSampleRate(Link.RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build())
+                    .setBufferSizeInBytes(Math.max(minMono, 0) * 4)
+                    .build();
+            } else {
+                try {
+                    loopback = Loopback.open(ctx, Link.RATE);
+                    record = loopback.record;
+                    Log.i("audio: capturing through an audio policy");
+                } catch (Exception e) {
+                    Throwable t = e instanceof java.lang.reflect.InvocationTargetException ? e.getCause() : e;
+                    Log.i("audio: no audio policy (" + t + "), recording the default output");
+                }
             }
             if (record == null)
                 record = new AudioRecord.Builder()
@@ -116,7 +139,7 @@ final class AudioSender {
         nacks = new Thread(this::nacks, "nacks");
         capture.start();
         nacks.start();
-        Log.i("audio: streaming to " + to);
+        Log.i(tag + "streaming to " + to);
     }
 
     void stop() {
@@ -199,7 +222,7 @@ final class AudioSender {
     private void capture() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         Cipher cipher = Crypto.cipher();
-        byte[] pcm = new byte[frames * Link.FRAME_BYTES];
+        byte[] pcm = new byte[frames * kind.frameBytes];
         int timestamp = 0, silent = 0;
         boolean gap = true;  // the first packet starts the stream
         String why = null;
@@ -236,7 +259,7 @@ final class AudioSender {
             } else {
                 silent = 0;
             }
-            byte[] d = Link.packAudio(cipher, key, gap ? Link.DISCONTINUITY : 0, seq, timestamp, pcm, 0, frames);
+            byte[] d = Link.packAudio(kind, cipher, key, gap ? Link.DISCONTINUITY : 0, seq, timestamp, pcm, 0, frames);
             synchronized (sent) {
                 sent[seq & (HISTORY - 1)] = d;
                 sentSeq[seq & (HISTORY - 1)] = seq;
@@ -251,7 +274,7 @@ final class AudioSender {
             timestamp += frames;
             packets++;
         }
-        Log.i("audio: stopped after " + packets + " packets" + (why != null ? ": " + why : ""));
+        Log.i(tag + "stopped after " + packets + " packets" + (why != null ? ": " + why : ""));
         release();
         listener.ended(why);
     }
@@ -282,7 +305,7 @@ final class AudioSender {
                 break;
             }
             long[] counter = new long[1];
-            int[] seqs = Link.unpackNack(cipher, key, buf, p.getLength(), counter);
+            int[] seqs = Link.unpackNack(kind, cipher, key, buf, p.getLength(), counter);
             if (seqs == null || counter[0] <= last)
                 continue;  // forged, or a replay
             last = counter[0];
@@ -300,6 +323,6 @@ final class AudioSender {
                 }
             }
         }
-        Log.i("audio: resent " + resent + " packets");
+        Log.i(tag + "resent " + resent + " packets");
     }
 }

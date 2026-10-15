@@ -18,7 +18,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 // The one screen: pairing with a PC (the code both ends show), the PCs
-// paired so far (connect, disconnect, connect automatically, forget). All of
+// paired so far (connect, disconnect, connect automatically, share the
+// microphone, forget). All of
 // it is the module's daemon's state, shown as it sends it.
 public final class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -175,7 +176,8 @@ public final class MainActivity extends Activity {
         String id = pc.optString("id");
         String name = pc.optString("name", "PC");
         boolean connected = pc.optBoolean("connected"), calling = pc.optBoolean("calling");
-        String state = pc.optBoolean("streaming") ? "Playing this phone's sound"
+        String state = pc.optBoolean("micLive") ? "Using this phone's microphone"
+                : pc.optBoolean("streaming") ? "Playing this phone's sound"
                 : connected ? "Connected"
                 : calling ? "Asking it to connect…"
                 : "Not connected";
@@ -214,6 +216,18 @@ public final class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((b, on) -> daemon.send("auto " + id + (on ? " on" : " off")));
         auto.addView(sw, ui.gapLeft(12));
         box.addView(auto, ui.gapTop(8));
+
+        LinearLayout mic = ui.row();
+        mic.setPadding(ui.dp(22), 0, 0, 0);
+        LinearLayout words3 = ui.column();
+        words3.addView(ui.text("Share the microphone", 14, ui.fg, false));
+        words3.addView(ui.note("The PC can record from it like a microphone of its own. It's only on while something there records."));
+        mic.addView(words3, Ui.grow());
+        Switch micSw = new Switch(this);
+        micSw.setChecked(pc.optBoolean("mic"));
+        micSw.setOnCheckedChangeListener((b, on) -> daemon.send("mic " + id + (on ? " on" : " off")));
+        mic.addView(micSw, ui.gapLeft(12));
+        box.addView(mic, ui.gapTop(8));
         return box;
     }
 }
