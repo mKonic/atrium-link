@@ -25,11 +25,13 @@ public final class Link {
     public static final int HELLO = 1, PAIR_COMMIT = 2, PAIR_KEY = 3, PAIR_REVEAL = 4, PAIR_ACCEPT = 5,
             PAIR_REJECT = 6, AUTH = 7, PROOF = 8, UNKNOWN = 9, REFUSED = 10,
             AUDIO_START = 16, AUDIO_STOP = 17, AUDIO_STATE = 18, MEDIA = 19, MEDIA_COMMAND = 20,
-            DISCONNECT = 21, WANT = 22, MIC_STATE = 23, MIC_START = 24, MIC_STOP = 25;
+            DISCONNECT = 21, WANT = 22, MIC_STATE = 23, MIC_START = 24, MIC_STOP = 25, KEY = 26;
 
     public static final int AUDIO_STOPPED = 0, AUDIO_STREAMING = 1, AUDIO_FAILED = 2;
     // MIC_STATE: not shared; shared and closed; recording; shared, but it can't record.
     public static final int MIC_OFF = 0, MIC_READY = 1, MIC_LIVE = 2, MIC_FAILED = 3;
+    // KEY: the phone's key, pressed (1) or let go (0).
+    public static final int KEY_VOLUME_UP = 1, KEY_VOLUME_DOWN = 2;
 
     public static final int MEDIA_NONE = 0, MEDIA_PLAYING = 1, MEDIA_PAUSED = 2, MEDIA_STOPPED = 3;
     public static final int CAN_PLAY = 1, CAN_PAUSE = 2, CAN_NEXT = 4, CAN_PREVIOUS = 8, CAN_SEEK = 16;

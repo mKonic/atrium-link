@@ -30,7 +30,8 @@ OLD_DIR=/data/user_de/0/com.android.shell/atrium-clipsync
         fi
         touch "$HOME_DIR/log"
         chmod 600 "$HOME_DIR/log"
-        su 2000 -c "CLASSPATH=$HOME_DIR/link.dex exec app_process /system/bin dev.atrium.link.Main $HOME_DIR" \
+        # The input group: the volume keys, when a PC has them (VolumeKeys).
+        su 2000 -g 2000 -G 1004 -c "CLASSPATH=$HOME_DIR/link.dex exec app_process /system/bin dev.atrium.link.Main $HOME_DIR" \
             >> "$HOME_DIR/log" 2>&1
         # Another copy of this loop runs it already.
         [ $? = 3 ] && break

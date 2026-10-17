@@ -28,7 +28,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 //
 // The Atrium Link app talks to it over Control: it sends commands ("pair",
 // "cancel", "accept", "reject", "connect <id>", "disconnect <id>",
-// "auto <id> on|off", "mic <id> on|off", "forget <id>") and gets the status,
+// "auto <id> on|off", "mic <id> on|off", "keys <id> on|off", "forget <id>")
+// and gets the status,
 // sent again on every change. Pairing is open for
 // PAIR_WINDOW_MS after "pair". The paired PCs are in `paired`, one per line:
 // hex id, hex key, name.
@@ -36,6 +37,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 // A PC the user shares the microphone with (`mic`, one id a line; none
 // until asked) sees it as a microphone of its own, and the phone records
 // only while something there records from it (MIC_START to MIC_STOP).
+//
+// A PC the user gives the volume keys to (`keys`, the same) gets them as KEY
+// while it's connected, and the phone's volume stays put (VolumeKeys).
 final class LanLink {
     private static final long PAIR_WINDOW_MS = 120_000;
     // How long "connect" asks the PC (over mDNS: the PC connects, not us).
@@ -53,6 +57,9 @@ final class LanLink {
     private final File manualFile;
     private final java.util.Set<String> micShared = new java.util.HashSet<>();
     private final File micFile;
+    private final java.util.Set<String> keysGiven = new java.util.HashSet<>();
+    private final File keysFile;
+    private final VolumeKeys volumeKeys;
     private final List<Conn> conns = new ArrayList<>();
     private final MediaBridge media;
     private int port;
@@ -73,6 +80,12 @@ final class LanLink {
         this.pairedFile = new File(dir, "paired");
         this.manualFile = new File(dir, "manual");
         this.micFile = new File(dir, "mic");
+        this.keysFile = new File(dir, "keys");
+        this.volumeKeys = new VolumeKeys(main, (key, down) -> {
+            for (Conn k : new ArrayList<>(conns))
+                if (k.link.ready() && keysGiven.contains(Crypto.hex(k.link.peerId())))
+                    k.apply(k.link.message(Link.KEY, new byte[] {(byte) key, (byte) (down ? 1 : 0)}));
+        });
         this.id = loadId(new File(dir, "id"));
         this.media = new MediaBridge(ctx, main, body -> {
             for (Conn k : new ArrayList<>(conns))
@@ -119,6 +132,27 @@ final class LanLink {
                     micShared.add(line.trim());
         } catch (IOException ignored) {
         }
+        try {
+            for (String line : Files.readAllLines(keysFile.toPath(), StandardCharsets.UTF_8))
+                if (paired.containsKey(line.trim()))
+                    keysGiven.add(line.trim());
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void saveKeys() {
+        StringBuilder sb = new StringBuilder();
+        for (String pc : keysGiven)
+            sb.append(pc).append('\n');
+        writeAtomically(keysFile, sb.toString());
+    }
+
+    // The volume keys are taken while a PC that has them is connected.
+    private void updateKeys() {
+        boolean on = false;
+        for (Conn k : conns)
+            on |= !k.closed && k.link.ready() && keysGiven.contains(Crypto.hex(k.link.peerId()));
+        volumeKeys.set(on);
     }
 
     private void saveMic() {
@@ -214,6 +248,12 @@ final class LanLink {
                         }
                 }
             }
+        } else if (c.startsWith("keys ")) {
+            String[] a = c.split(" ");
+            if (a.length == 3 && paired.containsKey(a[1])) {
+                if (a[2].equals("on") ? keysGiven.add(a[1]) : keysGiven.remove(a[1]))
+                    saveKeys();
+            }
         } else if (c.equals("cancel")) {
             pairUntil = 0;
             if (confirming != null)
@@ -230,12 +270,15 @@ final class LanLink {
                     saveManual();
                 if (micShared.remove(pc))
                     saveMic();
+                if (keysGiven.remove(pc))
+                    saveKeys();
                 for (Conn k : new ArrayList<>(conns))
                     if (Crypto.hex(k.link.peerId()).equals(pc))
                         k.close();
             }
         }
         writeStatus();
+        updateKeys();
     }
 
     private boolean pairingOpen() {
@@ -299,6 +342,7 @@ final class LanLink {
                 }
                 p.put("mic", micShared.contains(e.getKey()));
                 p.put("micLive", micLive);
+                p.put("keys", keysGiven.contains(e.getKey()));
                 p.put("connected", connected);
                 p.put("streaming", streaming);
                 p.put("calling", !connected && calling(e.getKey()));
@@ -476,6 +520,7 @@ final class LanLink {
                         apply(link.message(Link.MEDIA, media.current()));
                         micState(micShared.contains(Crypto.hex(link.peerId())) ? Link.MIC_READY : Link.MIC_OFF, "");
                         writeStatus();
+                        updateKeys();
                         break;
                     case Link.Event.MESSAGE:
                         message(e.type, e.bytes);
@@ -651,6 +696,7 @@ final class LanLink {
             }
             Log.i("lan: disconnected" + (link.peerName().isEmpty() ? "" : " from " + link.peerName()));
             writeStatus();
+            updateKeys();
         }
     }
 }

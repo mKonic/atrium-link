@@ -19,7 +19,7 @@ import org.json.JSONObject;
 
 // The one screen: pairing with a PC (the code both ends show), the PCs
 // paired so far (connect, disconnect, connect automatically, share the
-// microphone, forget). All of
+// microphone, media controls, forget). All of
 // it is the module's daemon's state, shown as it sends it.
 public final class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -228,6 +228,18 @@ public final class MainActivity extends Activity {
         micSw.setOnCheckedChangeListener((b, on) -> daemon.send("mic " + id + (on ? " on" : " off")));
         mic.addView(micSw, ui.gapLeft(12));
         box.addView(mic, ui.gapTop(8));
+
+        LinearLayout keys = ui.row();
+        keys.setPadding(ui.dp(22), 0, 0, 0);
+        LinearLayout words4 = ui.column();
+        words4.addView(ui.text("Media controls", 14, ui.fg, false));
+        words4.addView(ui.note("While connected, volume up and down press the PC's right and left arrow keys. The phone's volume stays put."));
+        keys.addView(words4, Ui.grow());
+        Switch keysSw = new Switch(this);
+        keysSw.setChecked(pc.optBoolean("keys"));
+        keysSw.setOnCheckedChangeListener((b, on) -> daemon.send("keys " + id + (on ? " on" : " off")));
+        keys.addView(keysSw, ui.gapLeft(12));
+        box.addView(keys, ui.gapTop(8));
         return box;
     }
 }
